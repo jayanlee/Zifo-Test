@@ -41,6 +41,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:-dev-only-change-me}
       ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-15}
       REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS:-7}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
     ports:
       - "8001:8000"
     depends_on:

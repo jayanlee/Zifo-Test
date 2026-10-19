@@ -32,14 +32,20 @@ def _set_refresh_cookie(response: Response, raw_token: str) -> None:
         value=raw_token,
         httponly=True,
         samesite="lax",
-        secure=False,
+        secure=settings.cookie_secure,
         path="/api/auth",
         max_age=settings.refresh_token_expire_days * 24 * 60 * 60,
     )
 
 
 def _clear_refresh_cookie(response: Response) -> None:
-    response.delete_cookie(key="refresh_token", path="/api/auth", httponly=True, samesite="lax")
+    response.delete_cookie(
+        key="refresh_token",
+        path="/api/auth",
+        httponly=True,
+        samesite="lax",
+        secure=settings.cookie_secure,
+    )
 
 
 def _reject_refresh() -> JSONResponse:
