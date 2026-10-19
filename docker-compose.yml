@@ -1,0 +1,85 @@
+# One command starts both databases, both APIs, and the UI.
+# The frontend nginx container is the local CloudFront: one hostname,
+# /api/auth and /api/tasks proxied, everything else is the static React build.
+# Host install is Docker Desktop only. Postgres, Python, Node, and nginx run here.
+
+services:
+  auth-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: auth
+      POSTGRES_PASSWORD: ${POSTGRES_AUTH_PASSWORD:-auth}
+      POSTGRES_DB: auth
+    volumes:
+      - auth-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U auth -d auth"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  # Separate database from auth. Tasks store user_id with no foreign key,
+  # because the user row lives in auth-db.
+  task-db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: task
+      POSTGRES_PASSWORD: ${POSTGRES_TASK_PASSWORD:-task}
+      POSTGRES_DB: task
+    volumes:
+      - task-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U task -d task"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  auth-service:
+    build: ./auth-service
+    environment:
+      DATABASE_URL: postgresql+psycopg://auth:${POSTGRES_AUTH_PASSWORD:-auth}@auth-db:5432/auth
+      JWT_SECRET: ${JWT_SECRET:-dev-only-change-me}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-15}
+      REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS:-7}
+    ports:
+      - "8001:8000"
+    depends_on:
+      auth-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+  task-service:
+    build: ./task-service
+    environment:
+      DATABASE_URL: postgresql+psycopg://task:${POSTGRES_TASK_PASSWORD:-task}@task-db:5432/task
+      JWT_SECRET: ${JWT_SECRET:-dev-only-change-me}
+    ports:
+      - "8002:8000"
+    depends_on:
+      task-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "9000:80"
+    depends_on:
+      auth-service:
+        condition: service_healthy
+      task-service:
+        condition: service_healthy
+
+volumes:
+  auth-data:
+  task-data:
