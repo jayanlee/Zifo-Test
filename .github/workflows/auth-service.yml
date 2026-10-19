@@ -20,7 +20,7 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
       - uses: aws-actions/amazon-ecr-login@v2
       - run: |
-          docker build -t $ECR/zifo-auth:latest ./auth-service
-          docker push $ECR/zifo-auth:latest
+          docker build -t $ECR/jayan-test-zifo-auth:latest ./auth-service
+          docker push $ECR/jayan-test-zifo-auth:latest
         env:
           ECR: 229691749767.dkr.ecr.ap-southeast-2.amazonaws.com
