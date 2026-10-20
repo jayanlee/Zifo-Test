@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-and-push:
+  build-and-deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,10 +19,31 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
       - uses: aws-actions/amazon-ecr-login@v2
-      - run: |
-          docker build -t $ECR/jayan/zifo-auth:latest ./auth-service
-          docker push $ECR/jayan/zifo-auth:latest
+      - name: Build and push
         env:
           ECR: 229691749767.dkr.ecr.ap-southeast-2.amazonaws.com
-      - run: |
-          aws ecs update-service --cluster jayan-test-zifo --service auth --force-new-deployment
+        run: |
+          IMAGE=$ECR/jayan/zifo-auth:${GITHUB_SHA}
+          docker build -t "$IMAGE" ./auth-service
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+      - name: Fetch task definition
+        run: |
+          aws ecs describe-task-definition \
+            --task-definition jayan-zifo-auth \
+            --query taskDefinition \
+            --output json \
+          | jq 'del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy,.deregisteredAt)' \
+          > auth-task-def.json
+      - id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: auth-task-def.json
+          container-name: auth
+          image: ${{ env.IMAGE }}
+      - uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          service: auth
+          cluster: jayan-test-zifo
+          wait-for-service-stability: true
