@@ -168,17 +168,19 @@ flowchart TB
   </table>
 
   <h2>9. Production readiness</h2>
-  <p><strong>As-built</strong> is in AWS or git. <strong>Intended</strong> was specified for the ECS console (desired count 2, CPU autoscale 2–4) and must be confirmed there. <strong>Not built</strong> is out of scope for this demo.</p>
+  <p><strong>As-built</strong> is in AWS or git. <strong>Not built</strong> is out of scope or blocked (free-tier RDS has no Multi-AZ).</p>
   <h3>High availability</h3>
+  <p>Three ALB/Fargate AZs do <strong>not</strong> make the app HA. Single-AZ RDS <code>database-1</code> is the bottleneck: if that AZ or instance fails, auth and task APIs fail even if Fargate still has capacity.</p>
   <table>
     <thead><tr><th>Item</th><th>Status</th><th>Detail</th></tr></thead>
     <tbody>
       <tr><td>ALB / Fargate AZs</td><td>As-built</td><td>Subnets ap-southeast-2a, 2b, 2c</td></tr>
-      <tr><td>Task count / autoscale</td><td>Intended</td><td>Desired 2; CPU 70% min 2 max 4</td></tr>
+      <tr><td>Task count / autoscale</td><td>As-built</td><td>Desired 1; autoscale enabled; max 4</td></tr>
       <tr><td>Rolling deploy</td><td>As-built</td><td>Min 100% max 200%; circuit breaker and rollback on; grace 120s</td></tr>
-      <tr><td>RDS</td><td>As-built</td><td>Single-AZ. Not Multi-AZ</td></tr>
+      <tr><td>RDS</td><td>As-built</td><td>Single-AZ. Free-tier instance cannot enable Multi-AZ</td></tr>
     </tbody>
   </table>
+  <p>For a write-primary app (login, refresh, task CRUD), <strong>Multi-AZ</strong> is the correct production HA pattern (sync standby, same endpoint). A <strong>read replica</strong> is wrong here (async reads only; extra cost). Neither is used in this demo.</p>
   <h3>Private networking</h3>
   <p>This is a <strong>demo</strong> network, not a fully private backend. Fargate public IP is on (ECR pull without NAT). ALB security group allows 80 from 0.0.0.0/0. CloudFront talks HTTP to the ALB. RDS 5432 is only from the ECS SG. Prod would use private subnets, no public IP, NAT or VPC endpoints, CloudFront prefix list on the ALB, and HTTPS to the origin.</p>
   <h3>Deployments, retries, backups</h3>
@@ -189,14 +191,15 @@ flowchart TB
       <tr><td>ALB GET /health on 8000; unhealthy targets drained</td><td>As-built</td></tr>
       <tr><td>init_db 30 × 1s OperationalError retries</td><td>As-built in code</td></tr>
       <tr><td>RDS backup 1 day</td><td>As-built</td></tr>
-      <tr><td>Restore drill, RDS Multi-AZ, WAF, security audit report</td><td>Not built / not in this document</td></tr>
+      <tr><td>Restore drill, WAF, security audit report</td><td>Not built / not in this document</td></tr>
+      <tr><td>RDS Multi-AZ / read replica</td><td>Not built (free tier has no Multi-AZ; replica is the wrong pattern)</td></tr>
     </tbody>
   </table>
   <h3>Security</h3>
   <p>Controls in place: private S3 + OAC, CloudFront HTTPS and SPA headers, JWT in Redux, refresh HttpOnly cookie, bcrypt, parameterized SQL, Secrets Manager, SG allow-lists, API cache disabled with Authorization forwarded. This file is not a pentest or IAM Access Analyzer sign-off.</p>
 
   <div class="note">
-    Do not treat the ALB DNS or the S3 website URL as the product. Do not put JWT in localStorage. Do not attach spa-index-rewrite to API behaviors. After a frontend deploy, invalidate CloudFront <code>/index.html</code> if the UI looks stale. Confirm desired count and autoscaling in the ECS console if you have not saved them yet.
+    Do not treat the ALB DNS or the S3 website URL as the product. Do not put JWT in localStorage. Do not attach spa-index-rewrite to API behaviors. After a frontend deploy, invalidate CloudFront <code>/index.html</code> if the UI looks stale. ECS desired count is 1 with autoscale to 4. RDS stays Single-AZ on free tier.
   </div>
 
   <script>

@@ -128,19 +128,23 @@ Do not use the ALB DNS or S3 URL as the product site. Do not attach `spa-index-r
 
 ## Production readiness (as-built vs not built)
 
-This section is evidence for reviewers. **As-built** is in AWS or git. **Intended** was specified for the console but must be confirmed in ECS. **Not built** is out of scope for this demo.
+This section is evidence for reviewers. **As-built** is in AWS or git. **Not built** is out of scope or blocked (for example free-tier RDS).
 
 ### High availability
+
+Three ALB/Fargate AZs do **not** make the whole application highly available. `database-1` is **Single-AZ**. If that AZ or instance fails, **both** auth and task APIs fail even if Fargate still has capacity in other AZs.
 
 | Item | Status | Detail |
 | --- | --- | --- |
 | ALB AZs | As-built | Internet-facing ALB mapped to default subnets in **ap-southeast-2a, 2b, 2c** |
-| Fargate subnets | As-built | Same three public subnets so tasks can land in more than one AZ |
-| Task count | Intended | Desired **2** per service (`auth`, `task`) so one task dying is not total outage |
-| Autoscale | Intended | Target tracking CPU **70%**, min **2**, max **4** |
-| Rolling deploy | As-built (service create) | Min healthy **100%**, max **200%**, circuit breaker **on**, rollback **on**, health grace **120s** |
-| RDS | As-built | **Single-AZ** `database-1`. **Not** Multi-AZ. One AZ failure takes the database down |
+| Fargate subnets | As-built | Same three public subnets so a scaled-out task can land in another AZ |
+| Task count | As-built | Desired **1** per service (`auth`, `task`) |
+| Autoscale | As-built | Enabled; scales from **1** up to **4** |
+| Rolling deploy | As-built | Min healthy **100%**, max **200%**, circuit breaker **on**, rollback **on**, health grace **120s** |
+| RDS | As-built | **Single-AZ** `database-1`. Availability bottleneck for the demo |
 | CloudFront / S3 | As-built | Multi-edge CDN; objects in regional bucket |
+
+**RDS Multi-AZ vs read replica (not built):** login, refresh, and task CRUD **write** on the hot path. **Multi-AZ** (sync standby, same endpoint, automatic failover) is the correct production HA pattern for that writer. **Read replica** is the wrong tool here (async **reads** only; writes stay on the primary; promote + new URL; extra instance). This instance was created on the **free-tier / Dev** path, which **does not offer Multi-AZ**. A replica is also not free. No RDS Modify and no replica for this demo.
 
 ### Private networking (demo, not a private backend)
 
@@ -170,10 +174,11 @@ This section is evidence for reviewers. **As-built** is in AWS or git. **Intende
 | ECS circuit breaker + rollback | Service deployment | As-built at create |
 | RDS connect retry | `init_db` in `app/main.py`: 30 × 1s on `OperationalError` then fail | As-built in code |
 | HTTP client retries | Browser refresh-once on 401 | As-built in frontend; not a mesh/sidecar |
-| Service auto scaling | CPU 70%, 2–4 tasks | Intended in console |
+| Service auto scaling | Enabled, desired **1**, max **4** | As-built |
 | RDS automated backup | Retention **1 day**, no cross-region replica | As-built |
 | Restore drill | Restore snapshot to a new instance and run login | **Not done** — this document is not a restore test record |
-| RDS Multi-AZ | — | **Not built** |
+| RDS Multi-AZ | Correct prod HA for this writer; **not offered on free-tier RDS** | **Not built** |
+| RDS read replica | Wrong pattern (reads only) and not free | **Not built** |
 
 ### Security (controls vs audit)
 
@@ -191,8 +196,8 @@ This section is evidence for reviewers. **As-built** is in AWS or git. **Intende
 
 ### How to confirm in the console
 
-1. ECS services: running count, deployment circuit breaker, autoscaling min/max.
+1. ECS services: running count **1**, autoscale max **4**, circuit breaker.
 2. Task networking: public IP, subnet IDs (2a/2b/2c).
-3. RDS: Multi-AZ **No**, backup window / retention.
+3. RDS: Multi-AZ **No** (free tier); backup window / retention.
 4. ECR: latest image tag is `sha-runid`; task def revision image URI matches.
 5. CloudWatch log groups `/ecs/jayan-zifo-auth` and `/ecs/jayan-zifo-task`.
