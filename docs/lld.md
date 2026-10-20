@@ -6,11 +6,11 @@ The browser talks to **one hostname**: `https://d1fh72q9mw0l25.cloudfront.net`. 
 
 Open [lld.html](lld.html) in a browser → **Ctrl+P** → **Save as PDF** for a downloadable copy.
 
-## Dummy story
+## Overview
 
-1. Person opens the CloudFront URL (HTTPS 443). That is the shop front.
-2. HTML/JS/CSS come from a locked S3 cupboard. Only CloudFront has the key (OAC + bucket policy).
-3. Login and tasks go through an ALB: `/api/auth*` → auth, `/api/tasks*` → task.
+1. The client opens the CloudFront URL over HTTPS 443.
+2. Static assets are served from private S3. CloudFront is the only reader (OAC and bucket policy).
+3. `/api/auth*` and `/api/tasks*` go to the ALB, then to the auth and task ECS services.
 4. Each service uses its own Postgres database on one RDS instance. Secrets are in Secrets Manager, not GitHub.
 
 ## Runtime

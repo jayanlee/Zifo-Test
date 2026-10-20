@@ -33,12 +33,12 @@
   <p class="sub">AWS account 229691749767 · region ap-southeast-2 · CloudFront distribution E4EDW133P7EXJ</p>
   <p>The browser talks to <strong>one hostname</strong>: <code>https://d1fh72q9mw0l25.cloudfront.net</code>. That is CloudFront. React uses relative paths such as <code>/api/auth/login</code> and <code>/api/tasks</code>. It never calls S3, ECS, or RDS directly. Locally, nginx on port 3000 (or Docker 9000) did the same job.</p>
 
-  <h2>1. Dummy story</h2>
+  <h2>1. Overview</h2>
   <ol>
-    <li>Person opens the CloudFront URL (HTTPS 443). That is the shop front.</li>
-    <li>HTML/JS/CSS come from a locked S3 cupboard. Only CloudFront has the key (OAC + bucket policy).</li>
-    <li>Login and tasks go through an ALB receptionist: <code>/api/auth*</code> → auth container, <code>/api/tasks*</code> → task container.</li>
-    <li>Each container uses its own Postgres database on one RDS instance. Secrets live in Secrets Manager, not in GitHub.</li>
+    <li>The client opens the CloudFront URL over HTTPS 443.</li>
+    <li>Static assets are served from private S3. CloudFront is the only reader (OAC and bucket policy).</li>
+    <li><code>/api/auth*</code> and <code>/api/tasks*</code> go to the ALB, then to the auth and task ECS services.</li>
+    <li>Each service uses its own Postgres database on one RDS instance. Secrets are in Secrets Manager, not in GitHub.</li>
   </ol>
 
   <h2>2. Runtime request path</h2>
