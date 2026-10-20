@@ -23,7 +23,7 @@ jobs:
         env:
           ECR: 229691749767.dkr.ecr.ap-southeast-2.amazonaws.com
         run: |
-          IMAGE=$ECR/jayan/zifo-auth:${GITHUB_SHA}
+          IMAGE=$ECR/jayan/zifo-auth:${GITHUB_SHA}-${GITHUB_RUN_ID}
           docker build -t "$IMAGE" ./auth-service
           docker push "$IMAGE"
           echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
