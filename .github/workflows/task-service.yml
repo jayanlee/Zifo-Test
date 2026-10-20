@@ -24,3 +24,5 @@ jobs:
           docker push $ECR/jayan/zifo-task:latest
         env:
           ECR: 229691749767.dkr.ecr.ap-southeast-2.amazonaws.com
+      - run: |
+          aws ecs update-service --cluster jayan-test-zifo --service task --force-new-deployment

@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Zifo task app — low-level design</title>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <style>
+    @page { size: A4; margin: 14mm; }
+    body {
+      font-family: Segoe UI, Helvetica, Arial, sans-serif;
+      color: #111;
+      line-height: 1.45;
+      font-size: 11pt;
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 12px 16px 40px;
+    }
+    h1 { font-size: 20pt; margin: 0 0 8px; }
+    h2 { font-size: 14pt; margin: 28px 0 8px; page-break-after: avoid; }
+    h3 { font-size: 12pt; margin: 16px 0 6px; }
+    p, li { font-size: 10.5pt; }
+    .sub { color: #444; margin-bottom: 20px; }
+    table { border-collapse: collapse; width: 100%; margin: 10px 0 18px; font-size: 9.5pt; }
+    th, td { border: 1px solid #ccc; padding: 6px 8px; text-align: left; vertical-align: top; }
+    th { background: #f3f3f3; }
+    .mermaid { margin: 12px 0 20px; page-break-inside: avoid; }
+    .note { background: #f6f6f6; border-left: 3px solid #333; padding: 8px 12px; margin: 12px 0; }
+    code { font-size: 9pt; }
+  </style>
+</head>
+<body>
+  <h1>Zifo task app — low-level design</h1>
+  <p class="sub">AWS account 229691749767 · region ap-southeast-2 · CloudFront distribution E4EDW133P7EXJ</p>
+  <p>The browser talks to <strong>one hostname</strong>: <code>https://d1fh72q9mw0l25.cloudfront.net</code>. That is CloudFront. React uses relative paths such as <code>/api/auth/login</code> and <code>/api/tasks</code>. It never calls S3, ECS, or RDS directly. Locally, nginx on port 3000 (or Docker 9000) did the same job.</p>
+
+  <h2>1. Dummy story</h2>
+  <ol>
+    <li>Person opens the CloudFront URL (HTTPS 443). That is the shop front.</li>
+    <li>HTML/JS/CSS come from a locked S3 cupboard. Only CloudFront has the key (OAC + bucket policy).</li>
+    <li>Login and tasks go through an ALB receptionist: <code>/api/auth*</code> → auth container, <code>/api/tasks*</code> → task container.</li>
+    <li>Each container uses its own Postgres database on one RDS instance. Secrets live in Secrets Manager, not in GitHub.</li>
+  </ol>
+
+  <h2>2. Runtime request path</h2>
+  <div class="mermaid">
+flowchart TB
+  U[Browser] -->|HTTPS 443| CF[CloudFront d1fh72q9mw0l25.cloudfront.net]
+  CF -->|/api/auth*| B1[Behavior auth CachingDisabled AllViewerExceptHostHeader]
+  CF -->|/api/tasks*| B2[Behavior tasks same policies]
+  CF -->|* else| B0[Default GET HEAD CachingOptimized spa-index-rewrite headers policy]
+  B0 -->|OAC signed GET 443| S3[S3 jayan-zifo-test private]
+  B1 -->|HTTP 80| ALB[ALB jayan-test-zifo-alb SG alb inbound 80]
+  B2 -->|HTTP 80| ALB
+  ALB -->|/api/auth*| TG1[TG auth HTTP 8000 /health]
+  ALB -->|/api/tasks*| TG2[TG task HTTP 8000 /health]
+  ALB -->|other paths| R404[fixed 404]
+  TG1 -->|8000 from ALB SG| AUTH[ECS auth jayan/zifo-auth:latest]
+  TG2 -->|8000 from ALB SG| TASK[ECS task jayan/zifo-task:latest]
+  AUTH -->|5432 from ECS SG| RDS[RDS database-1 DBs auth and task]
+  TASK --> RDS
+  SM[Secrets Manager three secrets] -.-> AUTH
+  SM -.-> TASK
+  </div>
+
+  <h2>3. CloudFront path split (nginx equivalent)</h2>
+  <div class="mermaid">
+flowchart LR
+  REQ[Request URI] --> Q{match}
+  Q -->|/api/auth*| A[ALB then ECS auth :8000]
+  Q -->|/api/tasks*| T[ALB then ECS task :8000]
+  Q -->|/login /register no dot| F[Function rewrites to /index.html]
+  Q -->|/assets/*.js has a dot| S[S3 object as-is]
+  Q -->|/ | R[default root index.html]
+  F --> S3[S3 bucket]
+  S --> S3
+  R --> S3
+  </div>
+  <p>Function <code>spa-index-rewrite</code> is on the <strong>S3 behavior only</strong>. API behaviors must not use it, or <code>/api/auth/login</code> would become HTML.</p>
+
+  <h2>4. Login and tokens</h2>
+  <div class="mermaid">
+sequenceDiagram
+  participant B as Browser
+  participant CF as CloudFront 443
+  participant S3 as S3
+  participant ALB as ALB 80
+  participant Auth as ECS auth 8000
+  participant DB as RDS auth
+  participant Task as ECS task 8000
+  B->>CF: GET /
+  CF->>S3: OAC GetObject index.html
+  S3-->>B: SPA
+  B->>CF: POST /api/auth/login
+  CF->>ALB: HTTP POST Cookie and body
+  ALB->>Auth: port 8000
+  Auth->>DB: bcrypt verify
+  Auth-->>B: access_token JSON plus refresh cookie Path=/api/auth HttpOnly Secure SameSite=Lax
+  Note over B: access JWT only in Redux
+  B->>CF: GET /api/tasks Authorization Bearer
+  CF->>ALB: Authorization forwarded
+  ALB->>Task: port 8000
+  Task->>Task: verify HS256 with shared JWT_SECRET
+  </div>
+  <p><code>COOKIE_SECURE=true</code> on ECS. Local Compose uses <code>COOKIE_SECURE=false</code> for http://localhost.</p>
+
+  <h2>5. Deploy pipelines</h2>
+  <div class="mermaid">
+flowchart TB
+  GIT[git push main] --> GHA[GitHub Actions]
+  GHA -->|frontend/** IAM keys| S3[s3 sync dist to jayan-zifo-test]
+  GHA -->|auth-service/**| ECR1[ECR jayan/zifo-auth:latest]
+  GHA -->|task-service/**| ECR2[ECR jayan/zifo-task:latest]
+  ECR1 -.-> AUTH[ECS auth needs new deployment to pick image]
+  ECR2 -.-> TASK[ECS task]
+  S3 -.-> CF[CloudFront may cache old index.html]
+  </div>
+  <p>GitHub secrets used by CI: <code>AWS_ACCESS_KEY_ID</code>, <code>AWS_SECRET_ACCESS_KEY</code>, <code>AWS_REGION</code>, <code>S3_BUCKET</code>. IAM user may S3-sync that bucket and ecr:Push to <code>jayan/zifo-auth</code> and <code>jayan/zifo-task</code>. Secrets Manager is <strong>not</strong> read by CI. ECS injects JSON keys with <code>:DATABASE_URL::</code> and <code>:JWT_SECRET::</code> on the secret ARN.</p>
+
+  <h2>6. Ports and who may connect</h2>
+  <table>
+    <thead>
+      <tr><th>Hop</th><th>Port</th><th>Allow</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Browser → CloudFront</td><td>443</td><td>Internet</td></tr>
+      <tr><td>CloudFront → S3</td><td>443</td><td>Only distribution E4EDW133P7EXJ via OAC + bucket policy GetObject</td></tr>
+      <tr><td>CloudFront → ALB</td><td>80</td><td>SG jayan-test-zifo-alb inbound 80 from 0.0.0.0/0</td></tr>
+      <tr><td>ALB → ECS</td><td>8000</td><td>SG jayan-test-zifo-ecs inbound 8000 from ALB SG</td></tr>
+      <tr><td>ECS → RDS</td><td>5432</td><td>SG jayan-test-zifo-rds inbound 5432 from ECS SG</td></tr>
+      <tr><td>GitHub Actions → AWS APIs</td><td>443</td><td>IAM access keys in GitHub</td></tr>
+    </tbody>
+  </table>
+
+  <h2>7. Named resources</h2>
+  <table>
+    <thead>
+      <tr><th>Piece</th><th>Name / value</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>CloudFront URL</td><td>https://d1fh72q9mw0l25.cloudfront.net</td></tr>
+      <tr><td>S3</td><td>jayan-zifo-test</td></tr>
+      <tr><td>SPA function</td><td>spa-index-rewrite (viewer request, S3 behavior only)</td></tr>
+      <tr><td>Response headers</td><td>zifo-spa-security-headers (S3 behavior; CSP, nosniff, DENY, no-referrer, Permissions-Policy, HSTS)</td></tr>
+      <tr><td>ALB DNS</td><td>jayan-test-zifo-alb-1511092230.ap-southeast-2.elb.amazonaws.com</td></tr>
+      <tr><td>Target groups</td><td>jayan-test-zifo-auth-tg, jayan-test-zifo-task-tg · health GET /health on 8000</td></tr>
+      <tr><td>ECS cluster</td><td>jayan-test-zifo · services auth, task · Fargate public IP on</td></tr>
+      <tr><td>ECR</td><td>jayan/zifo-auth, jayan/zifo-task</td></tr>
+      <tr><td>RDS</td><td>database-1 · databases auth and task · user zifo_test · sslmode=require</td></tr>
+      <tr><td>Secrets</td><td>jayan-zifo/auth/database-url, jayan-zifo/task/database-url, jayan-zifo/jwt-secret</td></tr>
+      <tr><td>VPC</td><td>vpc-0bb18839614a614d0 default</td></tr>
+    </tbody>
+  </table>
+
+  <h2>8. Local vs AWS</h2>
+  <table>
+    <thead>
+      <tr><th>Role</th><th>Local host</th><th>Docker Compose</th><th>AWS</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>Public hostname</td><td>nginx :3000</td><td>frontend :9000→80</td><td>CloudFront :443</td></tr>
+      <tr><td>UI files</td><td>Vite :5173</td><td>nginx root in image</td><td>S3 + OAC</td></tr>
+      <tr><td>Auth API</td><td>uvicorn :8080</td><td>auth-service :8000</td><td>ECS auth :8000 via ALB</td></tr>
+      <tr><td>Task API</td><td>uvicorn :8081</td><td>task-service :8000</td><td>ECS task :8000 via ALB</td></tr>
+      <tr><td>Databases</td><td>local Postgres auth/task</td><td>auth-db, task-db</td><td>one RDS, two databases</td></tr>
+    </tbody>
+  </table>
+
+  <div class="note">
+    Do not treat the ALB DNS or the S3 website URL as the product. Do not put JWT in localStorage. Do not attach spa-index-rewrite to API behaviors. After a frontend deploy, invalidate CloudFront <code>/index.html</code> if the UI looks stale.
+  </div>
+
+  <script>
+    mermaid.initialize({ startOnLoad: true, theme: "neutral", securityLevel: "strict" });
+  </script>
+</body>
+</html>
