@@ -54,8 +54,8 @@ flowchart TB
   ALB -->|/api/auth*| TG1[TG auth HTTP 8000 /health]
   ALB -->|/api/tasks*| TG2[TG task HTTP 8000 /health]
   ALB -->|other paths| R404[fixed 404]
-  TG1 -->|8000 from ALB SG| AUTH[ECS auth jayan/zifo-auth:latest]
-  TG2 -->|8000 from ALB SG| TASK[ECS task jayan/zifo-task:latest]
+  TG1 -->|8000 from ALB SG| AUTH[ECS auth SHA-RUN_ID image]
+  TG2 -->|8000 from ALB SG| TASK[ECS task SHA-RUN_ID image]
   AUTH -->|5432 from ECS SG| RDS[RDS database-1 DBs auth and task]
   TASK --> RDS
   SM[Secrets Manager three secrets] -.-> AUTH
@@ -107,14 +107,16 @@ sequenceDiagram
   <div class="mermaid">
 flowchart TB
   GIT[git push main] --> GHA[GitHub Actions]
-  GHA -->|frontend/** IAM keys| S3[s3 sync dist to jayan-zifo-test]
-  GHA -->|auth-service/**| ECR1[ECR jayan/zifo-auth:latest]
-  GHA -->|task-service/**| ECR2[ECR jayan/zifo-task:latest]
-  ECR1 -.-> AUTH[ECS auth needs new deployment to pick image]
-  ECR2 -.-> TASK[ECS task]
+  GHA -->|frontend/**| S3[s3 sync dist to jayan-zifo-test]
+  GHA -->|auth-service/**| ECR1[ECR jayan/zifo-auth SHA-RUN_ID]
+  GHA -->|task-service/**| ECR2[ECR jayan/zifo-task SHA-RUN_ID]
+  ECR1 --> REG1[Register task def + UpdateService auth]
+  ECR2 --> REG2[Register task def + UpdateService task]
+  REG1 --> AUTH[ECS rolling deploy]
+  REG2 --> TASK[ECS rolling deploy]
   S3 -.-> CF[CloudFront may cache old index.html]
   </div>
-  <p>GitHub secrets used by CI: <code>AWS_ACCESS_KEY_ID</code>, <code>AWS_SECRET_ACCESS_KEY</code>, <code>AWS_REGION</code>, <code>S3_BUCKET</code>. IAM user may S3-sync that bucket and ecr:Push to <code>jayan/zifo-auth</code> and <code>jayan/zifo-task</code>. Secrets Manager is <strong>not</strong> read by CI. ECS injects JSON keys with <code>:DATABASE_URL::</code> and <code>:JWT_SECRET::</code> on the secret ARN.</p>
+  <p>GitHub secrets: <code>AWS_ACCESS_KEY_ID</code>, <code>AWS_SECRET_ACCESS_KEY</code>, <code>AWS_REGION</code>, <code>S3_BUCKET</code>. API images use immutable tags <code>${GITHUB_SHA}-${GITHUB_RUN_ID}</code>, then a new ECS task definition and service update. Secrets Manager is not read by CI. ECS injects <code>:DATABASE_URL::</code> / <code>:JWT_SECRET::</code>.</p>
 
   <h2>6. Ports and who may connect</h2>
   <table>
@@ -143,9 +145,9 @@ flowchart TB
       <tr><td>Response headers</td><td>zifo-spa-security-headers (S3 behavior; CSP, nosniff, DENY, no-referrer, Permissions-Policy, HSTS)</td></tr>
       <tr><td>ALB DNS</td><td>jayan-test-zifo-alb-1511092230.ap-southeast-2.elb.amazonaws.com</td></tr>
       <tr><td>Target groups</td><td>jayan-test-zifo-auth-tg, jayan-test-zifo-task-tg · health GET /health on 8000</td></tr>
-      <tr><td>ECS cluster</td><td>jayan-test-zifo · services auth, task · Fargate public IP on</td></tr>
-      <tr><td>ECR</td><td>jayan/zifo-auth, jayan/zifo-task</td></tr>
-      <tr><td>RDS</td><td>database-1 · databases auth and task · user zifo_test · sslmode=require</td></tr>
+      <tr><td>ECS cluster</td><td>jayan-test-zifo · services auth, task · Fargate public IP on · subnets 2a/2b/2c</td></tr>
+      <tr><td>ECR</td><td>jayan/zifo-auth, jayan/zifo-task · tag immutability on</td></tr>
+      <tr><td>RDS</td><td>database-1 single-AZ · DBs auth and task · backup 1 day · sslmode=require</td></tr>
       <tr><td>Secrets</td><td>jayan-zifo/auth/database-url, jayan-zifo/task/database-url, jayan-zifo/jwt-secret</td></tr>
       <tr><td>VPC</td><td>vpc-0bb18839614a614d0 default</td></tr>
     </tbody>
@@ -165,8 +167,36 @@ flowchart TB
     </tbody>
   </table>
 
+  <h2>9. Production readiness</h2>
+  <p><strong>As-built</strong> is in AWS or git. <strong>Intended</strong> was specified for the ECS console (desired count 2, CPU autoscale 2–4) and must be confirmed there. <strong>Not built</strong> is out of scope for this demo.</p>
+  <h3>High availability</h3>
+  <table>
+    <thead><tr><th>Item</th><th>Status</th><th>Detail</th></tr></thead>
+    <tbody>
+      <tr><td>ALB / Fargate AZs</td><td>As-built</td><td>Subnets ap-southeast-2a, 2b, 2c</td></tr>
+      <tr><td>Task count / autoscale</td><td>Intended</td><td>Desired 2; CPU 70% min 2 max 4</td></tr>
+      <tr><td>Rolling deploy</td><td>As-built</td><td>Min 100% max 200%; circuit breaker and rollback on; grace 120s</td></tr>
+      <tr><td>RDS</td><td>As-built</td><td>Single-AZ. Not Multi-AZ</td></tr>
+    </tbody>
+  </table>
+  <h3>Private networking</h3>
+  <p>This is a <strong>demo</strong> network, not a fully private backend. Fargate public IP is on (ECR pull without NAT). ALB security group allows 80 from 0.0.0.0/0. CloudFront talks HTTP to the ALB. RDS 5432 is only from the ECS SG. Prod would use private subnets, no public IP, NAT or VPC endpoints, CloudFront prefix list on the ALB, and HTTPS to the origin.</p>
+  <h3>Deployments, retries, backups</h3>
+  <table>
+    <thead><tr><th>Control</th><th>Status</th></tr></thead>
+    <tbody>
+      <tr><td>API CI: immutable tag, register task def, update service</td><td>As-built in git</td></tr>
+      <tr><td>ALB GET /health on 8000; unhealthy targets drained</td><td>As-built</td></tr>
+      <tr><td>init_db 30 × 1s OperationalError retries</td><td>As-built in code</td></tr>
+      <tr><td>RDS backup 1 day</td><td>As-built</td></tr>
+      <tr><td>Restore drill, RDS Multi-AZ, WAF, security audit report</td><td>Not built / not in this document</td></tr>
+    </tbody>
+  </table>
+  <h3>Security</h3>
+  <p>Controls in place: private S3 + OAC, CloudFront HTTPS and SPA headers, JWT in Redux, refresh HttpOnly cookie, bcrypt, parameterized SQL, Secrets Manager, SG allow-lists, API cache disabled with Authorization forwarded. This file is not a pentest or IAM Access Analyzer sign-off.</p>
+
   <div class="note">
-    Do not treat the ALB DNS or the S3 website URL as the product. Do not put JWT in localStorage. Do not attach spa-index-rewrite to API behaviors. After a frontend deploy, invalidate CloudFront <code>/index.html</code> if the UI looks stale.
+    Do not treat the ALB DNS or the S3 website URL as the product. Do not put JWT in localStorage. Do not attach spa-index-rewrite to API behaviors. After a frontend deploy, invalidate CloudFront <code>/index.html</code> if the UI looks stale. Confirm desired count and autoscaling in the ECS console if you have not saved them yet.
   </div>
 
   <script>

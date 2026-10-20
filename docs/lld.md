@@ -27,8 +27,8 @@ flowchart TB
   ALB -->|/api/auth*| TG1[TG auth HTTP 8000 /health]
   ALB -->|/api/tasks*| TG2[TG task HTTP 8000 /health]
   ALB -->|other paths| R404[fixed 404]
-  TG1 -->|8000 from ALB SG| AUTH[ECS auth jayan/zifo-auth:latest]
-  TG2 -->|8000 from ALB SG| TASK[ECS task jayan/zifo-task:latest]
+  TG1 -->|8000 from ALB SG| AUTH[ECS auth SHA-RUN_ID image]
+  TG2 -->|8000 from ALB SG| TASK[ECS task SHA-RUN_ID image]
   AUTH -->|5432 from ECS SG| RDS[RDS database-1 DBs auth and task]
   TASK --> RDS
   SM[Secrets Manager three secrets] -.-> AUTH
@@ -85,15 +85,17 @@ ECS sets `COOKIE_SECURE=true`. Local Compose uses `false`.
 ```mermaid
 flowchart TB
   GIT[git push main] --> GHA[GitHub Actions]
-  GHA -->|frontend/** IAM keys| S3[s3 sync dist to jayan-zifo-test]
-  GHA -->|auth-service/**| ECR1[ECR jayan/zifo-auth:latest]
-  GHA -->|task-service/**| ECR2[ECR jayan/zifo-task:latest]
-  ECR1 -.-> AUTH[ECS auth needs new deployment to pick image]
-  ECR2 -.-> TASK[ECS task]
+  GHA -->|frontend/**| S3[s3 sync dist to jayan-zifo-test]
+  GHA -->|auth-service/**| ECR1[ECR jayan/zifo-auth SHA-RUN_ID]
+  GHA -->|task-service/**| ECR2[ECR jayan/zifo-task SHA-RUN_ID]
+  ECR1 --> REG1[Register new task def + UpdateService auth]
+  ECR2 --> REG2[Register new task def + UpdateService task]
+  REG1 --> AUTH[ECS rolling deploy]
+  REG2 --> TASK[ECS rolling deploy]
   S3 -.-> CF[CloudFront may cache old index.html]
 ```
 
-CI uses GitHub `AWS_*` secrets. It does not read Secrets Manager. ECS uses ARN suffix `:DATABASE_URL::` / `:JWT_SECRET::`.
+CI uses GitHub `AWS_*` secrets. It does not read Secrets Manager. ECS injects JSON keys with `:DATABASE_URL::` / `:JWT_SECRET::`. API workflows tag `${GITHUB_SHA}-${GITHUB_RUN_ID}` (immutable ECR), then `amazon-ecs-render-task-definition` + `amazon-ecs-deploy-task-definition` so a push **does** roll Fargate. Frontend deploy is S3 only; invalidate `/index.html` if the UI looks stale.
 
 ## Ports
 
@@ -116,10 +118,81 @@ CI uses GitHub `AWS_*` secrets. It does not read Secrets Manager. ECS uses ARN s
 | Headers | zifo-spa-security-headers |
 | ALB | jayan-test-zifo-alb-1511092230.ap-southeast-2.elb.amazonaws.com |
 | TGs | jayan-test-zifo-auth-tg, jayan-test-zifo-task-tg |
-| ECS | cluster jayan-test-zifo, services auth / task |
-| ECR | jayan/zifo-auth, jayan/zifo-task |
-| RDS | database-1, databases auth and task |
+| ECS | cluster jayan-test-zifo, services auth / task, Fargate public IP on |
+| ECR | jayan/zifo-auth, jayan/zifo-task (tag immutability on) |
+| RDS | database-1 single-AZ, databases auth and task, backup retention 1 day |
 | Secrets | jayan-zifo/auth/database-url, jayan-zifo/task/database-url, jayan-zifo/jwt-secret |
-| VPC | vpc-0bb18839614a614d0 |
+| VPC | vpc-0bb18839614a614d0 default; subnets ap-southeast-2a/2b/2c |
 
 Do not use the ALB DNS or S3 URL as the product site. Do not attach `spa-index-rewrite` to API behaviors.
+
+## Production readiness (as-built vs not built)
+
+This section is evidence for reviewers. **As-built** is in AWS or git. **Intended** was specified for the console but must be confirmed in ECS. **Not built** is out of scope for this demo.
+
+### High availability
+
+| Item | Status | Detail |
+| --- | --- | --- |
+| ALB AZs | As-built | Internet-facing ALB mapped to default subnets in **ap-southeast-2a, 2b, 2c** |
+| Fargate subnets | As-built | Same three public subnets so tasks can land in more than one AZ |
+| Task count | Intended | Desired **2** per service (`auth`, `task`) so one task dying is not total outage |
+| Autoscale | Intended | Target tracking CPU **70%**, min **2**, max **4** |
+| Rolling deploy | As-built (service create) | Min healthy **100%**, max **200%**, circuit breaker **on**, rollback **on**, health grace **120s** |
+| RDS | As-built | **Single-AZ** `database-1`. **Not** Multi-AZ. One AZ failure takes the database down |
+| CloudFront / S3 | As-built | Multi-edge CDN; objects in regional bucket |
+
+### Private networking (demo, not a private backend)
+
+| Item | Status | Detail |
+| --- | --- | --- |
+| Fargate public IP | As-built **on** | So tasks pull ECR without NAT. ENIs are reachable from the internet on **no** port unless an SG allows it; app port **8000** is only from the ALB SG |
+| ALB SG | As-built | Inbound **80 from 0.0.0.0/0**. CloudFront is not restricted to the CloudFront prefix list |
+| Origin protocol | As-built | CloudFront → ALB **HTTP 80** (TLS ends at CloudFront) |
+| RDS | As-built | 5432 only from ECS SG; not 0.0.0.0/0 |
+| Fully private backend | **Not built** | Would need private subnets, no public IP, NAT or VPC endpoints for ECR/logs/secrets, ALB 80/443 only from CloudFront prefix list, HTTPS to ALB |
+
+### Automatic backend deployments
+
+| Item | Status | Detail |
+| --- | --- | --- |
+| Frontend | As-built | `frontend.yml`: `npm ci` / build / `aws s3 sync dist --delete` |
+| APIs | As-built in git | `auth-service.yml` / `task-service.yml`: build, push immutable tag, **register new task definition**, **update service**, wait for stability |
+| IAM | As-built | User `github-zifo-s3`: S3 + ECR push + `ecs:DescribeTaskDefinition` `RegisterTaskDefinition` `UpdateService` `DescribeServices` + `iam:PassRole` on `ecsTaskExecutionRole` |
+| Tag `latest` | Not used for rollouts | Immutable tags; each run is `${GITHUB_SHA}-${GITHUB_RUN_ID}` |
+
+### Autoscaling, retries, circuit breakers, backups
+
+| Control | Where | Status |
+| --- | --- | --- |
+| ALB health | `GET /health` on target port 8000, success 200 | As-built |
+| Unhealthy target | ALB stops sending traffic; ECS service starts a replacement | As-built |
+| ECS circuit breaker + rollback | Service deployment | As-built at create |
+| RDS connect retry | `init_db` in `app/main.py`: 30 × 1s on `OperationalError` then fail | As-built in code |
+| HTTP client retries | Browser refresh-once on 401 | As-built in frontend; not a mesh/sidecar |
+| Service auto scaling | CPU 70%, 2–4 tasks | Intended in console |
+| RDS automated backup | Retention **1 day**, no cross-region replica | As-built |
+| Restore drill | Restore snapshot to a new instance and run login | **Not done** — this document is not a restore test record |
+| RDS Multi-AZ | — | **Not built** |
+
+### Security (controls vs audit)
+
+**Implemented (not a pentest report):**
+
+- S3 Block Public Access; OAC + bucket policy locked to distribution `E4EDW133P7EXJ`; ACLs disabled
+- CloudFront HTTPS redirect; SPA CSP / nosniff / DENY / no-referrer / Permissions-Policy / HSTS on the S3 behavior
+- Access JWT in Redux only; refresh `HttpOnly` `SameSite=Lax` `Path=/api/auth`; `COOKIE_SECURE=true` on ECS
+- Passwords bcrypt; SQLAlchemy parameters; task `sub` from JWT; other users’ tasks 404
+- Secrets Manager for `DATABASE_URL` and `JWT_SECRET`; execution role `GetSecretValue`; JSON key `:KEY::` on the ARN
+- SG allow-lists: ALB 80 world (demo), ECS 8000 from ALB, RDS 5432 from ECS
+- API cache disabled; `Authorization` and `Cookie` forwarded on API behaviors
+
+**Not in this document:** vulnerability scan output, IAM Access Analyzer findings triage, WAF, CloudFront–ALB TLS, prefix-list restriction, restore test, or a signed security review. Those were not executed as an audit for this project.
+
+### How to confirm in the console
+
+1. ECS services: running count, deployment circuit breaker, autoscaling min/max.
+2. Task networking: public IP, subnet IDs (2a/2b/2c).
+3. RDS: Multi-AZ **No**, backup window / retention.
+4. ECR: latest image tag is `sha-runid`; task def revision image URI matches.
+5. CloudWatch log groups `/ecs/jayan-zifo-auth` and `/ecs/jayan-zifo-task`.
