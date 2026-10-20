@@ -29,12 +29,14 @@ jobs:
           echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
       - name: Fetch task definition
         run: |
+          set -euo pipefail
           aws ecs describe-task-definition \
             --task-definition jayan-zifo-auth \
-            --query taskDefinition \
-            --output json \
-          | jq 'del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy,.deregisteredAt)' \
-          > auth-task-def.json
+            --output json > task-def-raw.json
+          jq '.taskDefinition | del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy,.deregisteredAt)' \
+            task-def-raw.json > auth-task-def.json
+          test -s auth-task-def.json
+          jq -e 'type == "object" and .family == "jayan-zifo-auth"' auth-task-def.json
       - id: render
         uses: aws-actions/amazon-ecs-render-task-definition@v1
         with:
